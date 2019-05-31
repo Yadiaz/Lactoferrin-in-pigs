@@ -1,0 +1,365 @@
+#Loading libraries
+library(phyloseq); packageVersion("phyloseq")
+
+library(ggplot2); packageVersion("ggplot2")
+
+library("readxl") 
+
+library("dplyr")
+
+library(kableExtra)
+
+library(dada2)
+--------------------------------------------------------
+##Kneaddata performed for quality control of sequences using FastQC and Bowtie
+#!/bin/bash
+##
+#SBATCH -p production
+#SBATCH --mem=30G
+#SBATCH --time=1-18:0:0
+#SBATCH -n 10
+#SBATCH -o /share/magalab/Malnutrition/Kneaddata/kneaddata.out
+#SBATCH -e /share/magalab/Malnutrition/Kneaddata/kneaddata.err
+
+module load bowtie2/2.3.4.1
+module load fastqc/0.11.7
+module load trimmomatic/0.33
+module load trf/4.0.9
+
+aklog
+
+#note that to run this there are some issues with current code base and Python3.
+#The issue is discussed here:  https://bitbucket.org/biobakery/kneaddata/issues/8/error-during-reformatting-of-sequence
+#And a fix can be found here to edit the code base: https://bitbucket.org/biobakery/kneaddata/commits/dbc99e91f332
+cd /share/magalab/Malnutrition/Illumina_Files_mhLF-mhLZ_June_2014_Lydia/
+kneaddata --bypass-trim --input mhLF-mhLZ_S1_L001_R1_001.fastq.gz --input mhLF-mhLZ_S1_L001_R2_001.fastq.gz -t 10 -db /share/magalab/bin/Fastq_Screen_Index/Cow_Genome_ARS-UCD1.2_Index/ -db /share/magalab/bin/Fastq_Screen_Index/Phage_Index/ -db /share/magalab/bin/Fastq_Screen_Index/Cow_Mito_Index/ -db /share/magalab/bin/Fastq_Screen_Index/Human_Index/ --output ../Kneaddata/ --run-fastqc-start --run-fastqc-end
+
+----------------------------------------------------------------------
+#Samples were demultiplexed using Cutadapt
+#Barcodes and primers were removed
+
+#!/bin/bash
+##
+#SBATCH -p production
+#SBATCH --time=10:0:0
+#SBATCH --mem=10G
+#SBATCH -o /share/magalab/Malnutrition/CutAdapt/Error_Out_Files/cutadapt_BC.out
+#SBATCH -e /share/magalab/Malnutrition/CutAdapt/Error_Out_Files/cutadapt_BC.err
+
+aklog
+source activate cutadapt
+cd /share/magalab/Malnutrition/CutAdapt/TrimmedBC/
+ulimit -n 1200
+
+time cutadapt -g file:../barcodes_Mal.fa -G file:../barcodes_Mal.fa --error-rate=0 --no-indels --untrimmed-o no_barcodes_R1.fastq.gz --untrimmed-p no_barcodes_R2.fastq.gz -o {name}_R1.fastq.gz -p {name}_R2.fastq.gz ../../Kneaddata/mhLF-mhLZ_S1_L001_R1_001_kneaddata_paired_1.fastq ../../Kneaddata/mhLF-mhLZ_S1_L001_R1_001_kneaddata_paired_2.fastq
+----------------------------------------------------------------------
+#Dada2 Pipeline Tutorial 
+#Directing library location
+.libPaths( c( .libPaths(), "/share/magalab/bin/R_Lib2/"))
+setwd("/share/magalab/Malnutrition/DADA2/")
+#load the packages
+library("phyloseq",lib.loc="/share/magalab/bin/R_Lib2/"); packageVersion("phyloseq")
+library("dada2",lib.loc="/share/magalab/bin/R_Lib2/"); packageVersion("dada2")
+#
+path <- "/share/magalab/Malnutrition/CutAdapt/No_Primer/"
+list.files(path)
+#
+#Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_Trim_R1.fastq.gz", full.names = TRUE))
+saveRDS(fnFs, "/share/magalab/Malnutrition/DADA2/fnFs.rds")
+fnRs <- sort(list.files(path, pattern="_Trim_R2.fastq.gz", full.names = TRUE))
+saveRDS(fnRs, "/share/magalab/Malnutrition/DADA2/fnRs.rds")
+
+#
+#Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_Trim_R[1-2].fastq.gz"), `[`, 1)
+saveRDS(sample.names, "/share/magalab/Malnutrition/DADA2/sample.names.rds")
+
+# Place filtered files in filtered/ subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+saveRDS(filtFs, "/share/magalab/Malnutrition/DADA2/filtFs.rds")
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+saveRDS(filtRs, "/share/magalab/Malnutrition/DADA2/filtRs.rds")
+
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(220,200), maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE, compress=TRUE, multithread=TRUE, verbose=TRUE)
+out
+saveRDS(out, "/share/magalab/Malnutrition/DADA2/out.rds")
+
+#learn errors for DADA2 algorithm
+errF <- learnErrors(filtFs, multithread=TRUE)
+saveRDS(errF, "/share/magalab/Malnutrition/DADA2/errF.rds")
+errR <- learnErrors(filtRs, multithread=TRUE)
+saveRDS(errR, "/share/magalab/Malnutrition/DADA2/errR.rds")
+
+derepFs <- derepFastq(filtFs, verbose=TRUE)
+saveRDS(derepFs, "/share/magalab/Malnutrition/DADA2/derepFs.rds")
+derepRs <- derepFastq(filtRs, verbose=TRUE)
+saveRDS(derepRs, "/share/magalab/Malnutrition/DADA2/derepRs.rds")
+#
+# Name the derep-class objects by the sample names
+names(derepFs) <- sample.names
+names(derepRs) <- sample.names
+#
+dadaFs <- dada(derepFs, err=errF, multithread=TRUE, pool=TRUE)
+saveRDS(dadaFs, "/share/magalab/Malnutrition/DADA2/dadaFs.rds")
+dadaRs <- dada(derepRs, err=errR, multithread=TRUE, pool=TRUE)
+saveRDS(dadaRs, "/share/magalab/Malnutrition/DADA2/dadaRs.rds")
+#
+dadaFs[[1]]
+#
+#Merging forward and Reverse Reads
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE)
+saveRDS(mergers, "/share/magalab/Malnutrition/DADA2/mergers.rds")
+
+#Inspect the merger data.frame from the first sample
+mergers[[1]]
+
+#Construct Sequence Table
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+saveRDS(seqtab, "/share/magalab/Malnutrition/DADA2/seqtab.rds")
+
+#Removing chimeras
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+saveRDS(seqtab.nochim, "/share/magalab/Malnutrition/DADA2/seqtab.nochim.rds")
+dim(seqtab.nochim)
+
+#checking Frequency of chimeras
+sum(seqtab.nochim)/sum(seqtab)
+
+#Tracking read count through pipeline
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+track
+
+#Assigning Taxonomy using the DECIPHER Bioconducter Package
+dna <- DNAStringSet(getSequences(seqtab.nochim)) # Create a DNAStringSet from the ASVs
+load("Box\ Sync/SILVA_SSU_r132_March2018.RData") # CHANGE TO THE PATH OF YOUR TRAINING SET
+ids <- IdTaxa(dna, trainingSet, strand="top", processors=NULL, verbose=FALSE) # use all processors
+ranks <- c("domain", "phylum", "class", "order", "family", "genus", "species") # ranks of interest
+# Convert the output object of class "Taxa" to a matrix analogous to the output from assignTaxonomy
+taxid <- t(sapply(ids, function(x) {
+        m <- match(ranks, x$rank)
+        taxa <- x$taxon[m]
+        taxa[startsWith(taxa, "unclassified_")] <- NA
+        taxa
+}))
+colnames(taxid) <- ranks; rownames(taxid) <- getSequences(seqtab.nochim)
+
+taxa.print <- taxa # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+head(taxa.print)
+
+#giving our seq headers more manageable names (ASV_1, ASV_2...)
+asv_seqs <- colnames(seqtab.nochim)
+asv_headers <- vector(dim(seqtab.nochim)[2], mode="character")
+
+for (i in 1:dim(seqtab.nochim)[2]) {
+  asv_headers[i] <- paste(">ASV", i, sep="_")
+}
+#making and writing out a fasta of our final ASV seqs:
+#This fasta will also be used for making a tree...
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, "ASVs.fa")
+saveRDS(asv_fasta, "/share/magalab/Malnutrition/DADA2/asv_fasta.rds")
+#count table:
+asv_tab <- t(seqtab.nochim)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+write.table(asv_tab, "ASVs_counts.txt", sep="\t", quote=F)
+saveRDS(asv_tab, "/share/magalab/Malnutrition/DADA2/asv_tab.rds")
+#tax table:
+asv_tax <- sil_taxa.sp
+row.names(asv_tax) <- sub(">", "", asv_headers)
+write.table(asv_tax, "ASVs_taxonomy.txt", sep="\t", quote=F)
+saveRDS(asv_tax, "/share/magalab/Malnutrition/DADA2/asv_tax.rds")
+save.image()
+q()
+---------------------------------------------#Plotting Phylum using phyloseq and gplot#-------------------------
+#call in data that was run on the server
+#Data
+setwd("~/Box\ Sync/Yulissa/Yulissa_Server/DADA2/")
+seqtab.nochim <- readRDS("seqtab.nochim.rds")
+#Taxa
+sil_tax_sp_final <- readRDS("sil_tax_sp_final.rds")
+
+#MetaDataLocation 
+map <-read.csv("~/Box\ Sync/MappingFile_mhLF_Feces_wk3wk555.csv",sep=",",header=TRUE,row.names=12)
+map$GroupNames <- rownames(map)
+#Making phyloseq object
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               sample_data(map), 
+               tax_table(sil_tax_sp_final))
+ps
+
+#Removing empty ASVs
+#First remove week 3, then remove uncharacterized
+w5_ps <- subset_samples(ps, Time==c("W5"))
+ps <- subset_taxa(ps, !is.na(Phylum) & !Phylum %in% c("", "uncharacterized"))
+
+#Checking for empty samples, samples with no taxa assoicated with them (should be "FALSE").
+any(sample_sums(w5_ps) == 0)
+#Checking if there are ASVs that aren't present in any samples (should be "FALSE")
+any(taxa_sums(w5_ps) == 0)
+#Determining how many ASVs there are that aren't present in any sample
+sum(taxa_sums(ps) == 0)
+#removing ASVs that aren't present in any samples
+ps <- prune_taxa(taxa_sums(ps) > 0,ps)
+ps
+
+#Abundance of Phyla
+ps_phyla <- tax_glom(w5_ps, "Phylum")
+#Making relative
+ps_phyla_rel <- transform_sample_counts(ps_phyla, function(x) 100*(x/sum(x)))
+#calculating error bars to graph mean transformed abundance of major phyla
+melted <- psmelt(ps_phyla_rel)
+grouped <- dplyr::group_by(melted, TimeDietFed, Phylum)
+phyla <- as.data.frame(dplyr::summarise(grouped, mean=mean(Abundance), sd=sd(Abundance), sem = (sd(Abundance)/sqrt(length(Abundance)))))
+#Ordering
+phyla <- phyla[order(-phyla$mean),]
+phyla[,3:5] <- format(phyla[,3:5], digits = 3)
+kable(phyla, caption="Statistiscs for Abundance of Phyla") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 10) %>%
+  scroll_box(width = "100%", height = "300px")
+  
+#Which phyla are present at greater than 10% relative abundance
+lten <- as.list(as.character(unique(phyla[which(phyla$mean > 10),]$Phylum)))
+ten <-subset_taxa(ps_phyla_rel, Phylum== lten[[1]] | Phylum== lten[[2]] | Phylum==lten[[3]])
+#calculating error bars to graph mean transformed abundance of major phyla
+melted <- psmelt(ten)
+grouped <- dplyr::group_by(melted, TimeDietFed, Phylum)
+phyla_ten <- as.data.frame(dplyr::summarise(grouped, mean=mean(Abundance), sd=sd(Abundance), sem = (sd(Abundance)/sqrt(length(Abundance)))))
+
+#Plotting relative abundance #More than 10%
+ggplot(phyla_ten, aes(x=TimeDietFed, y=mean, fill= Phylum))+
+  geom_bar(aes(color=Phylum, fill=Phylum), stat="identity", position=position_dodge(), width=0.5)+
+  geom_errorbar(aes(ymin=mean-sem, ymax=mean+sem),width=.2, position=position_dodge())+
+  geom_abline(intercept = 0, slope = 0)+
+  theme_bw()+
+  facet_grid(Phylum ~ .,labeller = label_parsed, scales="free", space="free_x")+
+  theme(legend.position="none",axis.text.x=element_text(angle=305,face = "bold",size=12),strip.text.y=element_text(angle=0,face = "bold",size=12),strip.text.x=element_text(angle=0,face = "bold",size=12), axis.text= element_text(face = "bold",size=12), axis.title=element_text(face = "bold",size=12), panel.grid.major.x = element_blank(),panel.grid.minor.y=element_blank())+
+  labs(x="Sample Type", y="Average Relative Abundance")+ scale_x_discrete(limits=c("W5_FFNo","W5_MalNo","W5_MalCow","W5_MalhLF"), breaks=c("W5_FFNo","W5_MalNo","W5_MalCow","W5_MalhLF"))
+
+#Which phyla are present at less than 10% relative abundance
+ltens <- as.list(as.character(unique(phyla[which(phyla$mean < 10),]$Phylum)))
+tens <-subset_taxa(ps_phyla_rel, Phylum== ltens[[1]] | Phylum== ltens[[2]] | Phylum==ltens[[3]]| Phylum== ltens[[4]] | Phylum==ltens[[5]])
+#calculating error bars to graph mean transformed abundance of major phyla
+melted <- psmelt(tens)
+grouped <- dplyr::group_by(melted, TimeDietFed, Phylum)
+phyla_tens <- as.data.frame(dplyr::summarise(grouped, mean=mean(Abundance), sd=sd(Abundance), sem = (sd(Abundance)/sqrt(length(Abundance)))))
+
+#Plotting relative abundance #Less than 10%
+ggplot(phyla_tens, aes(x=TimeDietFed, y=mean, fill= Phylum))+
+  geom_bar(aes(color=Phylum, fill=Phylum), stat="identity", position=position_dodge(), width=0.5)+
+  geom_errorbar(aes(ymin=mean-sem, ymax=mean+sem),width=.2, position=position_dodge())+
+  geom_abline(intercept = 0, slope = 0)+
+  theme_bw()+
+  facet_grid(Phylum ~ .,labeller = label_parsed, scales="free", space="free_x")+
+  theme(legend.position="none",panel.spacing.x=unit(0,"lines"), axis.text.x=element_text(angle=305,face = "bold",size=12),strip.text.y=element_text(angle=0,face = "bold",size=12),strip.text.x=element_text(angle=0,face = "bold",size=12), axis.text= element_text(face = "bold",size=12), axis.title=element_text(face = "bold",size=12), panel.grid.major.x = element_blank(),panel.grid.minor.y=element_blank())+
+  labs(x="Sample Type", y="Average Relative Abundance")+ scale_x_discrete(limits=c("W5_FFNo","W5_MalNo","W5_MalCow","W5_MalhLF"), breaks=c("W5_FFNo","W5_MalNo","W5_MalCow","W5_MalhLF"))
+------------------------------------------#Plotting Family using phyloseq and gplot#-------------------------
+#Removing empty ASVs
+#First remove week 3, then remove uncharacterized
+w5_ps <- subset_samples(ps, Time==c("W5"))
+ps <- subset_taxa(ps, !is.na(Family) & !Family %in% c("", "uncharacterized"))
+
+#Checking for empty samples, samples with no taxa assoicated with them (should be "FALSE").
+any(sample_sums(w5_ps) == 0)
+#Checking if there are ASVs that aren't present in any samples (should be "FALSE")
+any(taxa_sums(w5_ps) == 0)
+#Determining how many ASVs there are that aren't present in any sample
+sum(taxa_sums(ps) == 0)
+#removing ASVs that aren't present in any samples
+ps <- prune_taxa(taxa_sums(ps) > 0,ps)
+ps
+
+#Abundance of Family 
+ps_family <- tax_glom(w5_ps, "Family")
+#Making relative
+ps_family_rel <- transform_sample_counts(ps_family, function(x) 100*(x/sum(x)))
+#calculating error bars to graph mean transformed abundance of major family
+melted <- psmelt(ps_family_rel)
+grouped <- dplyr::group_by(melted, TimeDietFed, Family)
+family <- as.data.frame(dplyr::summarise(grouped, mean=mean(Abundance), sd=sd(Abundance), sem = (sd(Abundance)/sqrt(length(Abundance)))))
+#Ordering
+family <- family[order(-family$mean),]
+family[,3:5] <- format(family[,3:5], digits = 3)
+kable(family, caption="Statistiscs for Abundance of Family") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 10) %>%
+  scroll_box(width = "100%", height = "300px")
+
+#Which phyla are present at more than 10% relative abundance
+ltens <- as.list(as.character(unique(family[which(family$mean > 10),]$Family)))
+tens <-subset_taxa(ps_family_rel, Family== ltens[[1]] | Family== ltens[[2]] | Family==ltens[[3]]| Family== ltens[[4]] | Family==ltens[[5]])
+#calculating error bars to graph mean transformed abundance of major family
+melted <- psmelt(tens)
+grouped <- dplyr::group_by(melted, TimeDietFed, Family)
+family_tens <- as.data.frame(dplyr::summarise(grouped, mean=mean(Abundance), sd=sd(Abundance), sem = (sd(Abundance)/sqrt(length(Abundance)))))
+
+#Plotting relative abundance More than 10%
+ggplot(family_tens, aes(x=TimeDietFed, y=mean, fill= Family))+
+  geom_bar(aes(color=Family, fill=Family), stat="identity", position=position_dodge(), width=0.5)+
+  geom_errorbar(aes(ymin=mean-sem, ymax=mean+sem),width=.2, position=position_dodge())+
+  geom_abline(intercept = 0, slope = 0)+
+  theme_bw()+
+  facet_grid(Family ~ .,labeller = label_parsed, scales="free", space="free_x")+
+  theme(legend.position="none",panel.spacing.x=unit(0,"lines"), axis.text.x=element_text(angle=305,face = "bold",size=12),strip.text.y=element_text(angle=0,face = "bold",size=12),strip.text.x=element_text(angle=0,face = "bold",size=12), axis.text= element_text(face = "bold",size=12), axis.title=element_text(face = "bold",size=12), panel.grid.major.x = element_blank(),panel.grid.minor.y=element_blank())+
+  labs(x="Sample Type", y="Average Relative Abundance")+ scale_x_discrete(limits=c("W5_FFNo","W5_MalNo","W5_MalCow","W5_MalhLF"), breaks=c("W5_FFNo","W5_MalNo","W5_MalCow","W5_MalhLF")) 
+  
+#Which phyla are present at less than 1% relative abundance
+lones <- as.list(as.character(unique(family[which(family$mean < 1),]$Family)))
+ones <-subset_taxa(ps_family_rel, Family== lones[[1]] | Family== lones[[2]] | Family==lones[[3]]| Family== lones[[4]] | Family==lones[[5]])
+#calculating error bars to graph mean transformed abundance of major family
+melted <- psmelt(ones)
+grouped <- dplyr::group_by(melted, TimeDietFed, Family)
+family_ones <- as.data.frame(dplyr::summarise(grouped, mean=mean(Abundance), sd=sd(Abundance), sem = (sd(Abundance)/sqrt(length(Abundance)))))
+
+
+#Plotting relative abundance less than 1%
+ggplot(family_ones, aes(x=TimeDietFed, y=mean, fill= Family))+
+  geom_bar(aes(color=Family, fill=Family), stat="identity", position=position_dodge(), width=0.5)+
+  geom_errorbar(aes(ymin=mean-sem, ymax=mean+sem),width=.2, position=position_dodge())+
+  geom_abline(intercept = 0, slope = 0)+
+  theme_bw()+
+  facet_grid(Family ~ .,labeller = label_parsed, scales="free", space="free_x")+
+  theme(legend.position="none",panel.spacing.x=unit(0,"lines"), axis.text.x=element_text(angle=305,face = "bold",size=12),strip.text.y=element_text(angle=0,face = "bold",size=12),strip.text.x=element_text(angle=0,face = "bold",size=12), axis.text= element_text(face = "bold",size=12), axis.title=element_text(face = "bold",size=12), panel.grid.major.x = element_blank(),panel.grid.minor.y=element_blank())+
+  labs(x="Sample Type", y="Average Relative Abundance")+ scale_x_discrete(limits=c("W5_FFNo","W5_MalNo","W5_MalCow","W5_MalhLF"), breaks=c("W5_FFNo","W5_MalNo","W5_MalCow","W5_MalhLF"))
+  ------------------------------------Plotting Alpha Diversity--------------------
+#PlotAlphaDiversity
+plot_richness(w5_ps, x="TimeDietFed",color="TimeDietFed", measures=c("Observed")) +labs(x="Sample Type", y="Alpha Diversity Measure") + scale_x_discrete(limits=c("W5_FFNo","W5_MalNo","W5_MalCow","W5_MalhLF"), breaks=c("W5_FFNo","W5_MalNo","W5_MalCow","W5_MalhLF"))+theme(legend.position="none",panel.spacing.x=unit(0,"lines"), axis.text.x=element_text(angle=305,face = "bold",size=12),strip.text.y=element_text(angle=0,face = "bold",size=12),strip.text.x=element_text(angle=0,face = "bold",size=12), axis.text= element_text(face = "bold",size=12), axis.title=element_text(face = "bold",size=12))
+ 
+ -------------------------------------Plotting Beta Diversity--------------------
+ #Beta Diversity
+weighted <- ordinate(w5_ps, method="PCoA", distance="unifrac", weighted=TRUE)
+bray <- ordinate(w5_ps, method="PCoA", distance="bray")
+#pulling out eigenvalues to graph
+eval_per_bray <- (bray$values$Eigenvalues/(sum(bray$values$Eigenvalues)))*100
+#2D plot
+plot_ordination(w5_ps, bray,shape = "Diet", color="Fed")+
+  labs(title="Beta Diversity")+
+  geom_abline(intercept = 0, slope = 0) + 
+  geom_point(size = 3, alpha = 0.75) +
+  #stat_ellipse()+
+  theme(plot.title = element_text(hjust = 0,face = "bold"),axis.text= element_text(face = "bold"), axis.title=element_text(face = "bold"), legend.text=element_text(face = "bold"), legend.title=element_text(face = "bold"))
+  
+#Beta Diversity 3D
+#Making 3D plot with plotly
+library(plotly)
+bray <- ordinate(w5_ps, method="PCoA", distance="bray")
+
+#bray curtis distance
+pslog <- transform_sample_counts(w5_ps, function(x) log(1 + x))
+out.pcoa.log <- ordinate(pslog,  method = "MDS", distance = "bray")
+#pulling out eigenvalues to graph
+eval_per_bray <- (out.pcoa.log$values$Eigenvalues/(sum(out.pcoa.log$values$Eigenvalues)))*100
+
+plot_ly(data.frame(bray$vectors), x=~Axis.1, y=~Axis.2, z=~Axis.3, color=sample_data(w5_ps)$DietFed) %>% layout(xaxis=list(title="PC1 26.6%"),
+         yaxis=list(title="PC2 25%"),
+         zaxis=list(title="PC3 9.9%"))
+  
+  
